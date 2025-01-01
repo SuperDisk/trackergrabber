@@ -84,7 +84,7 @@
 (defparameter *song-data* (make-hash-table))
 
 (defun store-row (order-num row-num row)
-  (let ((pattern (alexandria:ensure-gethash order-num *song-data* (make-array 64 :initial-element nil))))
+  (let ((pattern (alexandria:ensure-gethash order-num *song-data* (make-array #x5F :initial-element nil))))
     (push row (aref pattern row-num))))
 
 (defun read-row (order-num row-num)
@@ -96,9 +96,7 @@
   (aref (gethash order-num *song-data*) row-num))
 
 (defun grab-crop (wand x y w h)
-  (let ((new-wand (magick:clone-magick-wand wand)))
-    (magick:crop-image new-wand w h x y)
-    new-wand))
+  (magick:get-image-region wand w h x y))
 
 (defmacro with-crop (old name rect &body body)
   `(let ((,name (grab-crop ,old ,@rect)))
@@ -150,61 +148,90 @@
   (print (classify wand *fx* :x-offset 1))
   )
 
+#+nil
+(progn
+  (setf lparallel:*kernel* (lparallel:make-kernel 10))
+  (let ((chan (lparallel.kernel:make-channel :fixed-capacity 1)))
+    (loop repeat 20 do
+      (lparallel:submit-task chan (lambda () 1))
+      (format t "added~%"))
+    (format t "done ~%")
+
+    (sleep 1)
+    (loop for result = (lparallel:try-receive-result chan :timeout 1)
+          while result do
+            (format t "got one!~%"))))
+
 (defun run (stream)
-  (let (prev-wand)
-    (loop for frame from 1 do;to 300 do
-      (let ((buf (make-array 6 :element-type '(unsigned-byte 8))))
-        (read-sequence buf stream)
-        (let ((data-size (apply #'bytes->int (cddr (coerce buf 'list)))))
-          (when (zerop data-size)
-            (return-from run))
-          (setf buf (adjust-array buf data-size))
-          (read-sequence buf stream :start 6 :end data-size)
+  (setf lparallel:*kernel* (lparallel:make-kernel 10))
+  (clrhash *song-data*)
+  (loop for frame from 1
+        with prev-wand
+        with sent = 0
+        with received = 0
+        with channel = (lparallel.kernel:make-channel) do
+          (loop for result = (lparallel:try-receive-result channel)
+                while result do
+                  (loop for data in result do
+                    (apply #'store-row data))
+                  (incf received))
 
-          (magick:with-magick-wand (wand)
-            (cffi:with-pointer-to-vector-data (ptr buf)
-              (magickreadimageblob wand ptr (length buf)))
+          (let ((buf (make-array 6 :element-type '(unsigned-byte 8))))
+            (read-sequence buf stream)
+            (let ((data-size (apply #'bytes->int (cddr (coerce buf 'list)))))
+              (when (zerop data-size)
+                (format t "FFmpeg said zero at frame ~a ~a ~a~%" frame sent received)
+                (loop repeat (- sent received)
+                      for result = (lparallel:receive-result channel) do
+                        (loop for data in result do
+                          (apply #'store-row data)))
+                (return-from run))
+              (setf buf (adjust-array buf data-size))
+              (read-sequence buf stream :start 6 :end data-size)
 
-            (magick:resize-image wand 800 600 :point)
+              (let ((wand (magick:new-magick-wand)))
+                (cffi:with-pointer-to-vector-data (ptr buf)
+                  (magickreadimageblob wand ptr (length buf)))
+                (magick:resize-image wand 800 600 :point)
+                (thresh wand 0.5)
 
-            (let ((og (magick:clone-magick-wand wand)))
-              (thresh wand 0.5)
-
-              ;; (magick:write-image wand "/dev/shm/cur-frame.png")
-
-              (let ((cropped-wand (grab-crop wand 0 248 800 352)))
-                (cond
-                  ((or (not prev-wand) (> (compare-images cropped-wand prev-wand) 600))
-                   (let* ((order-num (parse-integer (classify wand *order-num*) :radix 16))
-                          (row-num (parse-integer (classify wand *row-num*) :radix 16)))
-                     (loop for y from 0 downto (- (min row-num 6))
-                           for i from 0
-                           for row-num-2 = (parse-integer (classify wand *row-num* :y-offset y) :radix 16)
-                           for data = (loop for x from 0 to 7
-                                            collect
-                                            (loop for el in (list *note* *inst* *vol* *fx*)
-                                                  collect (classify wand el :x-offset x :y-offset y)))
-                           ;; when (and (= order-num 1) (= row-num-2 #x1d)) do
-                           ;;   (show wand)
-                           ;; end
-                           when (zerop i) do
-                             (format t "~x ~x |" order-num row-num-2)
-                             (loop for cell in data do
-                               (format t "~{~a ~}" cell))
-                             (terpri)
-                           end
-                           do (store-row order-num row-num-2 data))))
-                  (t (format t "Skipping ~a~%" frame)))
-                (when prev-wand
-                  (magick:destroy-magick-wand prev-wand))
-                (setf prev-wand cropped-wand)
-                (magick:destroy-magick-wand og)))))))))
+                (let ((cropped-wand (grab-crop wand 0 248 800 352)))
+                  (cond
+                    ((or (not prev-wand) (> (compare-images cropped-wand prev-wand) 600))
+                     (incf sent)
+                     (format t "Sending ~a~%" frame)
+                     (lparallel:submit-task
+                      channel
+                      (let ((frame frame))
+                        (lambda ()
+                          (let* ((order-num (parse-integer (classify wand *order-num*) :radix 16))
+                                 (row-num (parse-integer (classify wand *row-num*) :radix 16)))
+                            (prog1
+                                (loop for y from 0 downto (- (min row-num 6))
+                                      for i from 0
+                                      for row-num-2 = (parse-integer (classify wand *row-num* :y-offset y) :radix 16)
+                                      for data = (loop for x from 0 to 7
+                                                       collect
+                                                       (loop for el in (list *note* *inst* *vol* *fx*)
+                                                             collect (classify wand el :x-offset x :y-offset y)))
+                                      when (zerop i) do
+                                        (format t "~a: ~x ~x~%" frame order-num row-num-2)
+                                        ;; (format t "~x ~x |" order-num row-num-2)
+                                        ;; (loop for cell in data do
+                                        ;; (format t "~{~a ~}" cell))
+                                        ;; (terpri)
+                                      end
+                                      collect (list order-num row-num-2 data))
+                              (magick:destroy-magick-wand wand)))))))
+                    (t (format t "Skipping ~a~%" frame)
+                       (magick:destroy-magick-wand wand)))
+                  (when prev-wand
+                    (magick:destroy-magick-wand prev-wand))
+                  (setf prev-wand cropped-wand)))))))
 
 (defun drive ()
-  (setf lparallel:*kernel* (lparallel:make-kernel 16))
-  (clrhash *song-data*)
   (let ((process (uiop:launch-program
-                  '("ffmpeg" "-i" "/home/npfaro/Desktop/ss/supersquatting.webm"
+                  '("ffmpeg" "-i" "/home/npfaro/Desktop/ss/short.mp4"
                     ;; "-vf" "select=gte(n\,50),setpts=PTS-STARTPTS"
                     ;; "-af" "aselect=gte(n\,50),asetpts=PTS-STARTPTS"
                     "-f" "image2pipe" "-vcodec" "bmp" "-")
