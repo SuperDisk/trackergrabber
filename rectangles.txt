@@ -1,0 +1,9 @@
+row num: 0 751 42 23
+note: 44 751 91 23
+instr: 132 751 48 23
+vol?: 175 751 32 23
+fx: 205 751 61 23
+
+order num: 28 56 46 26
+
++228 is col width
