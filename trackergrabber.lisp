@@ -1,5 +1,5 @@
 (eval-when (:compile-toplevel :load-toplevel :execute)
-  (ql:quickload '(:lisp-magick-wand :alexandria :com.inuoe.jzon :dexador :lparallel) :silent t))
+  (ql:quickload '(:lisp-magick-wand :alexandria :serapeum :lparallel) :silent t))
 
 (cffi:defcfun "MagickReadImageBlob" :boolean
   (wand :pointer)
@@ -11,6 +11,16 @@
   (reference :pointer)
   (type :int)
   (distortion (:pointer :double)))
+
+(defun show (wand)
+  (let ((name (format nil "/dev/shm/~a.png" (gensym))))
+    (magick:write-image wand name)
+    (swank:eval-in-emacs `(slime-media-insert-image (create-image ,name) ,name))
+    wand))
+
+(defun thresh (wand threshold)
+  (magick:threshold-image wand (* threshold (nth-value 1 (magick:get-quantum-range))))
+  wand)
 
 (defun compare-images (wand1 wand2)
   (let ((dist (cffi:foreign-alloc :double)))
@@ -33,11 +43,12 @@
             (thresh wand 0.5)
             (cons wand (no-extension file)))))
 
-(defparameter *fixedsys* (load-dir "/home/npfaro/Desktop/ss/imgs/fixedsys/"))
-(defparameter *inst-num* (load-dir "/home/npfaro/Desktop/ss/imgs/inst-num/"))
-(defparameter *note-num* (load-dir "/home/npfaro/Desktop/ss/imgs/note-num/"))
-(defparameter *note* (load-dir "/home/npfaro/Desktop/ss/imgs/note/"))
-(defparameter *vol* (load-dir "/home/npfaro/Desktop/ss/imgs/vol/"))
+(defparameter *fixedsys-imgs* (load-dir "/home/npfaro/Desktop/ss/imgs/fixedsys/"))
+(defparameter *inst-num-imgs* (load-dir "/home/npfaro/Desktop/ss/imgs/inst-num/"))
+(defparameter *note-num-imgs* (load-dir "/home/npfaro/Desktop/ss/imgs/note-num/"))
+(defparameter *note-imgs* (load-dir "/home/npfaro/Desktop/ss/imgs/note/"))
+(defparameter *vol-imgs* (load-dir "/home/npfaro/Desktop/ss/imgs/vol/"))
+(defparameter *sharp-imgs* (load-dir "/home/npfaro/Desktop/ss/imgs/sharp/"))
 
 
 (defun bytes->int (b1 b2 b3 b4)
@@ -47,50 +58,42 @@
    (ash b3 16)
    (ash b4 24)))
 
-;; row num: 0 751 42 23
-;; note: 44 751 91 23
-;; instr: 132 751 48 23
-;; vol?: 175 751 32 23
-;; fx: 205 751 61 23
+(defparameter *col-offset* 95)
+(defparameter *row-offset* 13)
 
-;; order num: 28 56 46 26
+(defparameter *order-num* '((*fixedsys-imgs* 13 33 8 11)
+                            (*fixedsys-imgs* 21 33 8 11)))
 
-;; +228 is col width
+(defparameter *row-num* '((*inst-num-imgs* 0 419 7 8)
+                          (*inst-num-imgs* 8 419 7 8)))
 
-(defparameter *note-rect* '(91 23 44 751))
-(defparameter *instr-rect* '(48 23 132 751))
-(defparameter *vol-rect* '(32 23 175 751))
-(defparameter *fx-rect* '(61 23 205 751))
+(defparameter *note* '((*note-imgs* 22 419 8 8)
+                       (*sharp-imgs* 34 419 8 9)
+                       (*note-num-imgs* 46 419 8 8)))
 
-(defun wand-png (wand)
-  (magick:set-option wand "png:color-type" "2")
-  (magick:set-image-format wand "PNG")
-  ;; (magick:write-image wand (format nil "/tmp/~a-~a.png" name num))
-  (magick:get-image-blob wand))
+(defparameter *inst* '((*inst-num-imgs* 57 419 7 8)
+                       (*inst-num-imgs* 65 419 7 8)))
 
-(defun thresh (wand threshold)
-  (magick:threshold-image wand (* threshold (nth-value 1 (magick:get-quantum-range)))))
+(defparameter *vol*' ((*vol-imgs* 76 420 3 7)
+                      (*vol-imgs* 80 420 3 7)))
 
-(defun do-image (wand num)
-  (let* ((wands nil)
-         (imgs
-           (loop for (w h x y) in (list *note-rect* *instr-rect* *vol-rect* *fx-rect*)
-                 for name in '(note instr vol fx)
-                 for threshold in '(0.50 0.53 0.46 0.55)
-                 collect
-                 (let ((wand (magick:clone-magick-wand wand)))
-                   (push wand wands)
-                   (magick:crop-image wand w h (+ x (* 228 num)) y)
-                   (thresh wand threshold)
-                   (wand-png wand)))))
-    (mapcar #'magick:destroy-magick-wand wands)
-    (mapcar #'funcall
-            '(transcribe-note transcribe-inst transcribe-vol transcribe-fx)
-            imgs)))
+(defparameter *fx* '((*inst-num-imgs* 86 419 7 8)
+                     (*inst-num-imgs* 94 419 7 8)
+                     (*inst-num-imgs* 102 419 7 8)))
 
-(defun do-whole-image (wand)
-  (loop for i from 0 to 7
-        collect (do-image wand i)))
+(defparameter *song-data* (make-hash-table))
+
+(defun store-row (order-num row-num row)
+  (let ((pattern (alexandria:ensure-gethash order-num *song-data* (make-array 64 :initial-element nil))))
+    (push row (aref pattern row-num))))
+
+(defun read-row (order-num row-num)
+  (let* ((data (aref (gethash order-num *song-data*) row-num))
+         (assorted (serapeum:assort data :test #'equal)))
+    (car (alexandria:extremum assorted #'> :key #'length))))
+
+(defun read-all-rows (order-num row-num)
+  (aref (gethash order-num *song-data*) row-num))
 
 (defun grab-crop (wand x y w h)
   (let ((new-wand (magick:clone-magick-wand wand)))
@@ -99,8 +102,8 @@
 
 (defmacro with-crop (old name rect &body body)
   `(let ((,name (grab-crop ,old ,@rect)))
-     ,@body
-     (magick:destroy-magick-wand ,name)))
+     (prog1 (progn ,@body)
+       (magick:destroy-magick-wand ,name))))
 
 (defmacro with-crops (crops &body body)
   (cond
@@ -108,15 +111,48 @@
     (t `(with-crop ,@(car crops)
             (with-crops ,(cdr crops) ,@body)))))
 
-(defun process-wand (wand)
-  (magick:with-pixel-wand (pw :string "white")
-    (thresh wand 0.5)
-    (magick:negate-image wand nil)
-    (magick:border-image wand pw 255 255)))
+(defun classify (src rect &key (x-offset 0) (y-offset 0))
+  (apply #'concatenate 'string
+         (loop for entry in rect
+               collect
+               (destructuring-bind (img-set x y w h) entry
+                 (with-crop src crop ((+ x (* x-offset *col-offset*))
+                                      (+ y (* y-offset *row-offset*))
+                                      w
+                                      h)
+                   ;; (magick:write-image crop (format nil "/tmp/durr/~a" (gensym)))
+                   (let ((img-set (symbol-value img-set)))
+                     (loop for (img . name) in img-set
+                           with best = nil
+                           with best-val = nil do
+                             ;; (magick:write-image img "/tmp/durr/img.png")
+                             ;; (magick:write-image crop "/tmp/durr/crop.png")
+                             ;; (break)
+                             (let ((diff (compare-images img crop)))
+                               ;; (format t "Trying ~a ~a~%" name diff)
+                               (when (or (not best) (< diff best-val))
+                                 ;; (format t "Found new best: ~a~%" name)
+                                 (setf best name
+                                       best-val diff)))
+                           finally (return best))))))))
+
+#+nil
+(magick:with-magick-wand (wand :load "/home/npfaro/Desktop/ss/frame_048.bmp")
+  (magick:resize-image wand 800 600 :point)
+  (thresh wand 0.48)
+  (terpri)
+  (show wand)
+  (print (classify wand *order-num*))
+  (print (classify wand *row-num*))
+  (print (classify wand *note* :x-offset 1))
+  (print (classify wand *inst* :x-offset 1))
+  (print (classify wand *vol* :x-offset 1))
+  (print (classify wand *fx* :x-offset 1))
+  )
 
 (defun run (stream)
   (let (prev-wand)
-    (loop for x from 0 to 15 do
+    (loop for frame from 1 do;to 300 do
       (let ((buf (make-array 6 :element-type '(unsigned-byte 8))))
         (read-sequence buf stream)
         (let ((data-size (apply #'bytes->int (cddr (coerce buf 'list)))))
@@ -129,27 +165,48 @@
             (cffi:with-pointer-to-vector-data (ptr buf)
               (magickreadimageblob wand ptr (length buf)))
 
-            (let ((cropped-wand (grab-crop wand 0 444 1920 636)))
-              (cond
-                ((or (not prev-wand) (> (compare-images cropped-wand prev-wand) 500000))
-                 (with-crops ((wand order-num-wand (28 56 46 26))
-                              (wand row-num-wand (0 751 42 23)))
-                   (process-wand order-num-wand)
-                   (process-wand row-num-wand)
-                   (let ((order-num (transcribe-number (wand-png order-num-wand)))
-                         (row-num (transcribe-number (wand-png row-num-wand))))
-                     (magick:write-image order-num-wand "/tmp/ordnum.png")
-                     (magick:write-image row-num-wand "/tmp/rownum.png")
-                     (format t "order-num: ~a; row-num: ~a~%" order-num row-num)
-                     (format t "~a~%" (do-whole-image wand)))))
-                (t (format t "Skipping ~a~%" x)))
-              (when prev-wand
-                (magick:destroy-magick-wand prev-wand))
-              (setf prev-wand cropped-wand))))))))
+            (magick:resize-image wand 800 600 :point)
+
+            (let ((og (magick:clone-magick-wand wand)))
+              (thresh wand 0.5)
+
+              ;; (magick:write-image wand "/dev/shm/cur-frame.png")
+
+              (let ((cropped-wand (grab-crop wand 0 248 800 352)))
+                (cond
+                  ((or (not prev-wand) (> (compare-images cropped-wand prev-wand) 600))
+                   (let* ((order-num (parse-integer (classify wand *order-num*) :radix 16))
+                          (row-num (parse-integer (classify wand *row-num*) :radix 16)))
+                     (loop for y from 0 downto (- (min row-num 6))
+                           for i from 0
+                           for row-num-2 = (parse-integer (classify wand *row-num* :y-offset y) :radix 16)
+                           for data = (loop for x from 0 to 7
+                                            collect
+                                            (loop for el in (list *note* *inst* *vol* *fx*)
+                                                  collect (classify wand el :x-offset x :y-offset y)))
+                           ;; when (and (= order-num 1) (= row-num-2 #x1d)) do
+                           ;;   (show wand)
+                           ;; end
+                           when (zerop i) do
+                             (format t "~x ~x |" order-num row-num-2)
+                             (loop for cell in data do
+                               (format t "~{~a ~}" cell))
+                             (terpri)
+                           end
+                           do (store-row order-num row-num-2 data))))
+                  (t (format t "Skipping ~a~%" frame)))
+                (when prev-wand
+                  (magick:destroy-magick-wand prev-wand))
+                (setf prev-wand cropped-wand)
+                (magick:destroy-magick-wand og)))))))))
 
 (defun drive ()
+  (setf lparallel:*kernel* (lparallel:make-kernel 16))
+  (clrhash *song-data*)
   (let ((process (uiop:launch-program
-                  '("ffmpeg" "-i" "/home/npfaro/Desktop/ss/short.mp4"
+                  '("ffmpeg" "-i" "/home/npfaro/Desktop/ss/supersquatting.webm"
+                    ;; "-vf" "select=gte(n\,50),setpts=PTS-STARTPTS"
+                    ;; "-af" "aselect=gte(n\,50),asetpts=PTS-STARTPTS"
                     "-f" "image2pipe" "-vcodec" "bmp" "-")
                   :output :stream)))
     (unwind-protect
