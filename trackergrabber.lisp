@@ -209,20 +209,6 @@
   (print (classify wand *fx* :x-offset 1))
   )
 
-#+nil
-(progn
-  (setf lparallel:*kernel* (lparallel:make-kernel 10))
-  (let ((chan (lparallel.kernel:make-channel :fixed-capacity 1)))
-    (loop repeat 20 do
-      (lparallel:submit-task chan (lambda () 1))
-      (format t "added~%"))
-    (format t "done ~%")
-
-    (sleep 1)
-    (loop for result = (lparallel:try-receive-result chan :timeout 1)
-          while result do
-            (format t "got one!~%"))))
-
 (defun run (stream)
   (setf lparallel:*kernel* (lparallel:make-kernel 18))
   (clrhash *song-data*)
@@ -277,10 +263,6 @@
                                                              collect (classify wand el :x-offset x :y-offset y)))
                                       when (zerop i) do
                                         (format t "~a: ~x ~x~%" frame order-num row-num-2)
-                                        ;; (format t "~x ~x |" order-num row-num-2)
-                                        ;; (loop for cell in data do
-                                        ;; (format t "~{~a ~}" cell))
-                                        ;; (terpri)
                                       end
                                       collect (list order-num row-num-2 data))
                               (magick:destroy-magick-wand wand)))))))
