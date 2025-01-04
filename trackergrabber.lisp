@@ -12,6 +12,13 @@
   (type :int)
   (distortion (:pointer :double)))
 
+(defun p (&rest args)
+  (dolist (el args)
+    (princ el)
+    (princ " "))
+  (terpri)
+  nil)
+
 (defun show (wand)
   (let ((name (format nil "/dev/shm/~a.png" (gensym))))
     (magick:write-image wand name)
@@ -83,14 +90,74 @@
 
 (defparameter *song-data* (make-hash-table))
 
+(defmacro with-output-to-clipboard (&body body)
+  "Captures output from body forms and sends it to xclip. Returns the captured string."
+  `(let ((result (with-output-to-string (output-stream)
+                   (let ((*standard-output* output-stream))
+                     ,@body))))
+     (with-input-from-string (input result)
+       (uiop:run-program '("/usr/bin/xclip" "-in" "-sel" "clipboard")
+                         :input input
+                         :force-shell nil))
+     result))
+
 (defun store-row (order-num row-num row)
-  (let ((pattern (alexandria:ensure-gethash order-num *song-data* (make-array #x5F :initial-element nil))))
+  (let ((pattern (alexandria:ensure-gethash order-num *song-data* (make-array #x60 :initial-element nil))))
     (push row (aref pattern row-num))))
 
 (defun read-row (order-num row-num)
-  (let* ((data (aref (gethash order-num *song-data*) row-num))
-         (assorted (serapeum:assort data :test #'equal)))
-    (car (alexandria:extremum assorted #'> :key #'length))))
+  (when (< row-num #x5F)
+    (let* ((data (aref (gethash order-num *song-data*) row-num))
+           (assorted (serapeum:assort data :test #'equal)))
+      (car (alexandria:extremum assorted #'> :key #'length)))))
+
+(defun decimalize-string (str)
+  (let ((num (parse-integer str
+                            :radix 16
+                            :junk-allowed t)))
+    (if num
+        (format nil "~2,'0d" num)
+        str)))
+
+(defun print-cell (cell)
+  (let ((cell (mapcar #'copy-seq cell)))
+    (labels ((fmt (cell)
+               (substitute #\. #\Space cell))
+             (fmt-note (note)
+               (when (and (not (char= #\Space (char note 0)))
+                          (not (char= #\# (char note 1)))
+                          (not (char= #\= (char note 1))))
+                 (setf (char note 1) #\-))
+               (string-capitalize (fmt (substitute #\- #\_ note))))
+             (fmt-inst (inst)
+               (fmt (decimalize-string inst)))
+             (fmt-fx (fx)
+               (string-upcase (fmt fx)))
+             (fmt-vol (vol)
+               (if (string= vol "  ")
+                   "..."
+                   (concatenate 'string "v" (substitute #\0 #\Space vol)))))
+      (destructuring-bind (note inst vol fx) cell
+        (format t "|~a~a~a~a"
+                (fmt-note note)
+                (fmt-inst inst)
+                (fmt-vol vol)
+                (fmt-fx fx))))))
+
+(defun print-row (row)
+  (dolist (cell row)
+    (print-cell cell))
+  (terpri))
+
+(defun print-order (order-num)
+  (loop for i from 0
+        for row = (read-row order-num i)
+        while row do (print-row row)))
+
+(defun print-all-orders ()
+  (p "ModPlug Tracker  XM")
+  (loop for i from 0 below #x3B do
+        (print-order i)))
 
 (defun read-all-rows (order-num row-num)
   (aref (gethash order-num *song-data*) row-num))
@@ -118,18 +185,12 @@
                                       (+ y (* y-offset *row-offset*))
                                       w
                                       h)
-                   ;; (magick:write-image crop (format nil "/tmp/durr/~a" (gensym)))
                    (let ((img-set (symbol-value img-set)))
                      (loop for (img . name) in img-set
                            with best = nil
                            with best-val = nil do
-                             ;; (magick:write-image img "/tmp/durr/img.png")
-                             ;; (magick:write-image crop "/tmp/durr/crop.png")
-                             ;; (break)
                              (let ((diff (compare-images img crop)))
-                               ;; (format t "Trying ~a ~a~%" name diff)
                                (when (or (not best) (< diff best-val))
-                                 ;; (format t "Found new best: ~a~%" name)
                                  (setf best name
                                        best-val diff)))
                            finally (return best))))))))
@@ -163,7 +224,7 @@
             (format t "got one!~%"))))
 
 (defun run (stream)
-  (setf lparallel:*kernel* (lparallel:make-kernel 10))
+  (setf lparallel:*kernel* (lparallel:make-kernel 18))
   (clrhash *song-data*)
   (loop for frame from 1
         with prev-wand
@@ -231,9 +292,7 @@
 
 (defun drive ()
   (let ((process (uiop:launch-program
-                  '("ffmpeg" "-i" "/home/npfaro/Desktop/ss/short.mp4"
-                    ;; "-vf" "select=gte(n\,50),setpts=PTS-STARTPTS"
-                    ;; "-af" "aselect=gte(n\,50),asetpts=PTS-STARTPTS"
+                  '("ffmpeg" "-i" "/home/npfaro/Desktop/ss/supersquatting-trimmed.webm"
                     "-f" "image2pipe" "-vcodec" "bmp" "-")
                   :output :stream)))
     (unwind-protect

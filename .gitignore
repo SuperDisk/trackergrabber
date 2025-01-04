@@ -5,3 +5,6 @@ load_bmp
 *.mp4
 *.webm
 *.fasl
+*.abcl
+*.fas
+*.llc
