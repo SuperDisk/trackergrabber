@@ -12,6 +12,12 @@
   (type :int)
   (distortion (:pointer :double)))
 
+(defmacro -> (initial &rest forms)
+  (if (null forms)
+      initial
+      `(-> ,(list* (caar forms) initial (cdar forms))
+           ,@(cdr forms))))
+
 (defun p (&rest args)
   (dolist (el args)
     (princ el)
@@ -50,12 +56,12 @@
             (thresh wand 0.5)
             (cons wand (no-extension file)))))
 
-(defparameter *fixedsys-imgs* (load-dir "/home/npfaro/Desktop/ss/imgs/fixedsys/"))
-(defparameter *inst-num-imgs* (load-dir "/home/npfaro/Desktop/ss/imgs/inst-num/"))
-(defparameter *note-num-imgs* (load-dir "/home/npfaro/Desktop/ss/imgs/note-num/"))
-(defparameter *note-imgs* (load-dir "/home/npfaro/Desktop/ss/imgs/note/"))
-(defparameter *vol-imgs* (load-dir "/home/npfaro/Desktop/ss/imgs/vol/"))
-(defparameter *sharp-imgs* (load-dir "/home/npfaro/Desktop/ss/imgs/sharp/"))
+(defparameter *fixedsys-imgs* (load-dir "./imgs/fixedsys/"))
+(defparameter *inst-num-imgs* (load-dir "./imgs/inst-num/"))
+(defparameter *note-num-imgs* (load-dir "./imgs/note-num/"))
+(defparameter *note-imgs* (load-dir "./imgs/note/"))
+(defparameter *vol-imgs* (load-dir "./imgs/vol/"))
+(defparameter *sharp-imgs* (load-dir "./imgs/sharp/"))
 
 
 (defun bytes->int (b1 b2 b3 b4)
@@ -185,29 +191,10 @@
                                       (+ y (* y-offset *row-offset*))
                                       w
                                       h)
-                   (let ((img-set (symbol-value img-set)))
-                     (loop for (img . name) in img-set
-                           with best = nil
-                           with best-val = nil do
-                             (let ((diff (compare-images img crop)))
-                               (when (or (not best) (< diff best-val))
-                                 (setf best name
-                                       best-val diff)))
-                           finally (return best))))))))
-
-#+nil
-(magick:with-magick-wand (wand :load "/home/npfaro/Desktop/ss/frame_048.bmp")
-  (magick:resize-image wand 800 600 :point)
-  (thresh wand 0.48)
-  (terpri)
-  (show wand)
-  (print (classify wand *order-num*))
-  (print (classify wand *row-num*))
-  (print (classify wand *note* :x-offset 1))
-  (print (classify wand *inst* :x-offset 1))
-  (print (classify wand *vol* :x-offset 1))
-  (print (classify wand *fx* :x-offset 1))
-  )
+                   (-> img-set
+                       (symbol-value)
+                       (alexandria:extremum #'< :key (lambda (x) (compare-images (car x) crop)))
+                       (cdr)))))))
 
 (defun run (stream)
   (setf lparallel:*kernel* (lparallel:make-kernel 18))
@@ -274,7 +261,7 @@
 
 (defun drive ()
   (let ((process (uiop:launch-program
-                  '("ffmpeg" "-i" "/home/npfaro/Desktop/ss/supersquatting-trimmed.webm"
+                  '("ffmpeg" "-i" "./supersquatting-trimmed.webm"
                     "-f" "image2pipe" "-vcodec" "bmp" "-")
                   :output :stream)))
     (unwind-protect
